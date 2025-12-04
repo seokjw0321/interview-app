@@ -6,220 +6,152 @@ import json
 import gspread
 from google.oauth2.service_account import Credentials
 
-# --- 페이지 설정 ---
 st.set_page_config(page_title="인터뷰 레코더", layout="wide")
 
-# 스타일 커스텀
 st.markdown("""
 <style>
     .stTextArea textarea { font-size: 14px; background-color: #f9f9f9; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; }
-    div[data-testid="stMetricValue"] { font-size: 18px; }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 1. 구글 시트 연결 (강제 수술 모드) ---
-# 캐싱을 써서 새로고침해도 연결 유지
+# --- 구글 시트 연결 (개별 Secrets 방식) ---
 @st.cache_resource
 def get_google_sheet():
     try:
-        # 1. Secrets에서 JSON 문자열 가져오기
-        # [connections.gsheets] 안에 있어도 되고, 그냥 최상위에 있어도 찾도록 로직 구성
-        if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-            secrets_str = st.secrets["connections"]["gsheets"]["service_account"]
-        else:
-            # 혹시 형식이 다를 경우를 대비해 바로 service_account 키를 찾음
-            secrets_str = st.secrets["service_account"]
+        # Secrets 전체를 딕셔너리로 가져옴
+        creds_dict = dict(st.secrets["connections"]["gsheets"])
+        
+        # spreadsheet URL 분리
+        if "spreadsheet" in creds_dict:
+            sheet_url = creds_dict.pop("spreadsheet")
+        
+        # 🚨 [핵심] private_key 줄바꿈 문자(\n) 강제 교정
+        # TOML에서 가져올 때 문자열 \n으로 들어오는 것을 실제 엔터로 치환
+        if "private_key" in creds_dict:
+            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
-        # 2. 파이썬 딕셔너리로 변환
-        creds_dict = json.loads(secrets_str)
-
-        # 🚨 [핵심 수술] private_key의 줄바꿈 문자(\n)를 진짜 엔터로 치환
-        # 이게 안 되면 401 무조건 뜸
-        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-        # 3. 인증 범위 설정
         scopes = [
-            "[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)",
-            "[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive"
         ]
 
-        # 4. 인증 객체 생성
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
-
-        # 5. 시트 열기
-        if "connections" in st.secrets:
-            url = st.secrets["connections"]["gsheets"]["spreadsheet"]
-        else:
-            url = st.secrets["spreadsheet"]
-            
-        sh = client.open_by_url(url)
-        return sh
+        return client.open_by_url(sheet_url)
 
     except Exception as e:
-        st.error(f"🔥 연결 실패! 에러 내용을 찍어주세요: {e}")
+        st.error(f"🔥 연결 에러: {e}")
         return None
 
-# 연결 시도
+# 연결 실행
 sh = get_google_sheet()
+if not sh: st.stop()
 
-if not sh:
-    st.stop()
-
-# 워크시트 가져오기 (이름 "시트1" 확인 필수)
+# 워크시트 로드
 try:
     worksheet = sh.worksheet("시트1")
 except:
-    st.error("탭 이름이 '시트1'이 아닙니다. 구글 시트 아래 탭 이름을 확인해주세요.")
+    st.error("'시트1' 탭을 찾을 수 없습니다.")
     st.stop()
 
-# 데이터 프레임 로드
-data = worksheet.get_all_records()
-df = pd.DataFrame(data)
-
-# 필수 컬럼 정의 및 빈 데이터 처리
-required_cols = [
-    '지역', '이름', '직급', '직급 코드', '소속', 
-    '업무', '업무 카테고리', '참여의지', '인터뷰내용'
-]
+# 데이터 로드
+df = pd.DataFrame(worksheet.get_all_records())
+required_cols = ['지역', '이름', '직급', '직급 코드', '소속', '업무', '업무 카테고리', '참여의지', '인터뷰내용']
 
 if df.empty:
-    # 데이터가 아예 없으면 컬럼만 있는 빈 프레임 생성
     df = pd.DataFrame(columns=required_cols)
 else:
-    # 없는 컬럼 추가
     for col in required_cols:
-        if col not in df.columns:
-            df[col] = ""
+        if col not in df.columns: df[col] = ""
 
 df = df.fillna("")
 
-# --- [사이드바] 직원 검색 및 선택 ---
+# --- 사이드바 ---
 with st.sidebar:
     st.header("👥 인터뷰 대상자")
+    if df.empty: st.stop()
     
-    if df.empty:
-        st.warning("데이터가 없습니다.")
-        st.stop()
-
-    search_query = st.text_input("검색 (이름/소속)", placeholder="이름 입력...")
-    
-    # 문자열로 변환 후 검색
-    if search_query:
-        mask = df.apply(lambda x: search_query in str(x['이름']) or search_query in str(x['소속']), axis=1)
-        filtered_df = df[mask]
+    search = st.text_input("검색", placeholder="이름/소속")
+    if search:
+        mask = df.apply(lambda x: search in str(x['이름']) or search in str(x['소속']), axis=1)
+        filtered = df[mask]
     else:
-        filtered_df = df
-
-    if filtered_df.empty:
-        st.warning("검색 결과가 없습니다.")
-        st.stop()
-
-    # 라디오 버튼 옵션 생성
-    options = filtered_df.apply(lambda x: f"{x['이름']} ({x['소속']})", axis=1).tolist()
-    selected_option = st.radio("대상자 선택", options, label_visibility="collapsed")
+        filtered = df
+        
+    if filtered.empty: st.stop()
     
-    # 선택된 사람 찾기
-    selected_name = selected_option.split(" (")[0]
-    selected_dept = selected_option.split(" (")[1][:-1]
+    opts = filtered.apply(lambda x: f"{x['이름']} ({x['소속']})", axis=1).tolist()
+    sel = st.radio("선택", opts, label_visibility="collapsed")
     
-    # 인덱스 찾기 (Pandas Index가 아니라 gspread의 행 번호를 위해)
-    # 데이터프레임에서의 인덱스
-    mask = (df['이름'] == selected_name) & (df['소속'] == selected_dept)
-    person_row = df[mask].iloc[0]
-    person_idx = df[mask].index[0] 
+    s_name = sel.split(" (")[0]
+    s_dept = sel.split(" (")[1][:-1]
     
-    # 실제 구글 시트에서의 행 번호 (헤더가 1번이므로 +2)
-    # gspread는 1부터 시작, get_all_records는 헤더 제외하고 가져옴. 
-    # 안전하게 다시 매칭하는 로직 필요하지만 일단 간단히 계산
-    gsheet_row_num = person_idx + 2 
+    mask = (df['이름'] == s_name) & (df['소속'] == s_dept)
+    row = df[mask].iloc[0]
+    # gspread 행 번호 계산 (헤더1 + 인덱스 + 1(0부터시작보정) = +2)
+    row_num = df[mask].index[0] + 2
 
-# --- [메인 화면] ---
-st.subheader(f"📌 {person_row['이름']} {person_row['직급']} 인터뷰")
+# --- 메인 ---
+st.subheader(f"📌 {row['이름']} {row['직급']}")
+c1,c2,c3,c4,c5 = st.columns(5)
+c1.info(f"**소속**: {row['소속']}")
+c2.info(f"**지역**: {row['지역']}")
+c3.info(f"**업무**: {row['업무']}")
+c4.info(f"**의지**: {row['참여의지']}")
+c5.info(datetime.now().strftime('%H:%M'))
 
-col1, col2, col3, col4, col5 = st.columns(5)
-with col1: st.info(f"**소속**\n\n{person_row['소속']}")
-with col2: st.info(f"**지역**\n\n{person_row['지역']}")
-with col3: st.info(f"**업무**\n\n{person_row['업무']}")
-with col4: st.info(f"**참여의지**\n\n{person_row['참여의지']}")
-with col5: st.info(f"**시간**\n\n{datetime.now().strftime('%H:%M')}")
-
-st.markdown("---")
-
-# JSON 파싱
-saved_content = person_row['인터뷰내용']
-answers = {}
+# 내용 파싱
 try:
-    if str(saved_content).strip():
-        answers = json.loads(str(saved_content))
+    ans = json.loads(str(row['인터뷰내용'])) if str(row['인터뷰내용']).strip() else {}
 except:
-    answers = {"7-1": str(saved_content)}
+    ans = {"7-1": str(row['인터뷰내용'])}
 
-# --- 인터뷰 폼 ---
-st.markdown("### 📝 인터뷰 질문 리스트")
+# 폼
+st.markdown("---")
+with st.form("form"):
+    tabs = st.tabs(["Daily", "Weekly", "중요비정기", "문서/협업", "우회행동", "AI활용", "기타"])
+    
+    def q(t, k, q_txt):
+        with t:
+            st.markdown(f"**{k} {q_txt}**")
+            return st.text_area("-", value=ans.get(k, ""), height=100, key=k, label_visibility="collapsed")
 
-with st.form(key='interview_form'):
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-        "1. Daily", "2. Weekly", "3. 중요 비정기", 
-        "4. 문서/협업", "5. 우회행동", "6. AI 활용", "7. 기타"
-    ])
+    new_ans = {}
+    new_ans["1-1"] = q(tabs[0], "1-1", "출근 후 가장 먼저 하는 작업")
+    new_ans["1-2"] = q(tabs[0], "1-2", "매일 반복 중 자동화 필요")
+    new_ans["1-3"] = q(tabs[0], "1-3", "퇴근 전 필수 확인")
+    
+    new_ans["2-1"] = q(tabs[1], "2-1", "주 단위 작업")
+    new_ans["2-2"] = q(tabs[1], "2-2", "매주 반복 중 자동화 필요")
+    
+    new_ans["3-1"] = q(tabs[2], "3-1", "비정기 중요 업무")
+    new_ans["3-2"] = q(tabs[2], "3-2", "사용하는 기능/앱")
+    new_ans["3-3"] = q(tabs[2], "3-3", "어려움/복잡한 점")
+    
+    new_ans["4-1"] = q(tabs[3], "4-1", "시스템별 어려움")
+    new_ans["4-2"] = q(tabs[3], "4-2", "다른 방식 사용 경험")
+    
+    new_ans["5-1"] = q(tabs[4], "5-1", "추가 사용 도구")
+    new_ans["5-2"] = q(tabs[4], "5-2", "사용 이유")
+    
+    new_ans["6-1"] = q(tabs[5], "6-1", "사내 AI 사용 경험")
+    new_ans["6-2"] = q(tabs[5], "6-2", "기대에 못 미친 이유")
+    new_ans["6-3"] = q(tabs[5], "6-3", "도입 희망 기능")
+    new_ans["6-4"] = q(tabs[5], "6-4", "AI 도움 필요한 영역")
+    
+    new_ans["7-1"] = q(tabs[6], "7-1", "개선 요청")
+    new_ans["7-2"] = q(tabs[6], "7-2", "PC/모바일 비율")
 
-    def create_q(tab, key, question):
-        with tab:
-            st.markdown(f"**{key}. {question}**")
-            return st.text_area(label=question, value=answers.get(key, ""), height=100, key=f"k_{key}", label_visibility="collapsed")
-
-    # 질문 리스트
-    ans = {}
-    ans["1-1"] = create_q(tab1, "1-1", "출근 후 EP에서 가장 먼저 하는 작업")
-    ans["1-2"] = create_q(tab1, "1-2", "매일 반복 작업 중 자동화/간소화가 필요한 것")
-    ans["1-3"] = create_q(tab1, "1-3", "퇴근 전(또는 특정 시간) 반드시 확인하는 정보")
-    
-    ans["2-1"] = create_q(tab2, "2-1", "EP에서 주 단위로 처리하는 작업")
-    ans["2-2"] = create_q(tab2, "2-2", "매주 반복 작업 중 자동화/간소화가 필요한 부분")
-    
-    ans["3-1"] = create_q(tab3, "3-1", "비정기적이지만 중요도가 높은 업무")
-    ans["3-2"] = create_q(tab3, "3-2", "위 업무 수행 시 사용하는 EP 기능 또는 앱")
-    ans["3-3"] = create_q(tab3, "3-3", "업무 과정의 어려움이나 복잡한 부분")
-    
-    ans["4-1"] = create_q(tab4, "4-1", "EP시스템별 자주 겪는 어려움")
-    ans["4-2"] = create_q(tab4, "4-2", "기능 부족으로 다른 방식 이용 경험")
-    
-    ans["5-1"] = create_q(tab5, "5-1", "EP 기능 부족으로 추가 사용하는 도구")
-    ans["5-2"] = create_q(tab5, "5-2", "해당 도구를 사용하게 된 이유")
-    
-    ans["6-1"] = create_q(tab6, "6-1", "사내 AI 기능 중 실제로 사용해본 것")
-    ans["6-2"] = create_q(tab6, "6-2", "기대에 미치지 못했던 기능과 이유")
-    ans["6-3"] = create_q(tab6, "6-3", "외부 서비스 중 EP 도입 희망 기능")
-    ans["6-4"] = create_q(tab6, "6-4", "AI 지원 시 가장 도움될 업무 영역")
-    
-    ans["7-1"] = create_q(tab7, "7-1", "EP 개선 요청 사항")
-    ans["7-2"] = create_q(tab7, "7-2", "PC와 모바일 환경 사용 비율")
-
-    st.markdown("---")
-    submit = st.form_submit_button("💾 저장하기", use_container_width=True)
-
-    if submit:
+    if st.form_submit_button("💾 저장", use_container_width=True):
         try:
-            # JSON 변환
-            json_str = json.dumps(ans, ensure_ascii=False)
-            
-            # gspread로 업데이트 (API 직접 호출)
-            # '인터뷰내용' 컬럼 찾기 (헤더에서)
+            # 컬럼 위치 찾기
             headers = worksheet.row_values(1)
-            try:
-                col_idx = headers.index('인터뷰내용') + 1
-            except:
-                st.error("'인터뷰내용' 컬럼이 시트에 없습니다.")
-                st.stop()
-                
-            # 셀 업데이트 (행, 열, 값)
-            worksheet.update_cell(gsheet_row_num, col_idx, json_str)
-            
-            st.toast("✅ 저장 성공! (Google Sheets 반영 완료)")
+            col_idx = headers.index('인터뷰내용') + 1
+            # 업데이트
+            worksheet.update_cell(row_num, col_idx, json.dumps(new_ans, ensure_ascii=False))
+            st.toast("✅ 저장 완료")
             time.sleep(1)
             st.rerun()
-            
         except Exception as e:
             st.error(f"저장 실패: {e}")
