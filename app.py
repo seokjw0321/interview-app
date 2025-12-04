@@ -5,37 +5,70 @@ import time
 import json
 import gspread
 from google.oauth2.service_account import Credentials
+import pytz # 한국 시간 처리를 위해 추가
 
 st.set_page_config(page_title="인터뷰 레코더", layout="wide")
 
+# --- 스타일 커스텀 (카드 디자인 통일) ---
 st.markdown("""
 <style>
     .stTextArea textarea { font-size: 14px; background-color: #f9f9f9; }
     .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; }
+    
+    /* 상단 정보 카드 스타일 */
+    .info-card {
+        background-color: #F0F2F6;
+        padding: 15px;
+        border-radius: 8px;
+        text-align: center;
+        height: 100px; /* 높이 고정 */
+        display: flex;
+        flex-direction: column;
+        justify_content: center;
+        align-items: center;
+        box-shadow: 0 1px 2px rgba(0,0,0,0.1);
+    }
+    .info-label {
+        font-size: 12px;
+        color: #555;
+        margin-bottom: 5px;
+        font-weight: 600;
+    }
+    .info-value {
+        font-size: 16px;
+        font-weight: bold;
+        color: #31333F;
+        word-break: keep-all; /* 단어 단위 줄바꿈 */
+        line-height: 1.2;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# --- 구글 시트 연결 (개별 Secrets 방식) ---
+# --- 구글 시트 연결 ---
 @st.cache_resource
 def get_google_sheet():
     try:
-        # Secrets 전체를 딕셔너리로 가져옴
-        creds_dict = dict(st.secrets["connections"]["gsheets"])
-        
-        # spreadsheet URL 분리
+        conn_secrets = st.secrets["connections"]["gsheets"]
+        if "service_account" in conn_secrets:
+            # 개별 입력 방식 등 유연하게 처리
+            try:
+                creds_dict = json.loads(conn_secrets["service_account"], strict=False)
+            except:
+                creds_dict = dict(conn_secrets)
+        else:
+            creds_dict = dict(conn_secrets)
+            
+        # URL 분리
         if "spreadsheet" in creds_dict:
             sheet_url = creds_dict.pop("spreadsheet")
+        elif "spreadsheet" in st.secrets["connections"]["gsheets"]:
+             sheet_url = st.secrets["connections"]["gsheets"]["spreadsheet"]
         
-        # 🚨 [핵심] private_key 줄바꿈 문자(\n) 강제 교정
-        # TOML에서 가져올 때 문자열 \n으로 들어오는 것을 실제 엔터로 치환
+        # private_key 수술
         if "private_key" in creds_dict:
             creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
 
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
-
+        scopes = ["[https://www.googleapis.com/auth/spreadsheets](https://www.googleapis.com/auth/spreadsheets)", "[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
         client = gspread.authorize(creds)
         return client.open_by_url(sheet_url)
@@ -44,11 +77,9 @@ def get_google_sheet():
         st.error(f"🔥 연결 에러: {e}")
         return None
 
-# 연결 실행
 sh = get_google_sheet()
 if not sh: st.stop()
 
-# 워크시트 로드
 try:
     worksheet = sh.worksheet("시트1")
 except:
@@ -57,7 +88,12 @@ except:
 
 # 데이터 로드
 df = pd.DataFrame(worksheet.get_all_records())
-required_cols = ['지역', '이름', '직급', '직급 코드', '소속', '업무', '업무 카테고리', '참여의지', '인터뷰내용']
+
+# 필수 컬럼 (저장시간 추가됨)
+required_cols = [
+    '지역', '이름', '직급', '직급 코드', '소속', 
+    '업무', '업무 카테고리', '참여의지', '인터뷰내용', '저장시간'
+]
 
 if df.empty:
     df = pd.DataFrame(columns=required_cols)
@@ -89,26 +125,36 @@ with st.sidebar:
     
     mask = (df['이름'] == s_name) & (df['소속'] == s_dept)
     row = df[mask].iloc[0]
-    # gspread 행 번호 계산 (헤더1 + 인덱스 + 1(0부터시작보정) = +2)
     row_num = df[mask].index[0] + 2
 
-# --- 메인 ---
-st.subheader(f"📌 {row['이름']} {row['직급']}")
-c1,c2,c3,c4,c5 = st.columns(5)
-c1.info(f"**소속**: {row['소속']}")
-c2.info(f"**지역**: {row['지역']}")
-c3.info(f"**업무**: {row['업무']}")
-c4.info(f"**의지**: {row['참여의지']}")
-c5.info(datetime.now().strftime('%H:%M'))
+# --- 메인 상단 정보 (카드 UI 적용) ---
+st.markdown(f"### 📌 {row['이름']} {row['직급']}")
 
-# 내용 파싱
+# 4개의 정보를 균등하게 배치
+c1, c2, c3, c4 = st.columns(4)
+
+def info_card(label, value):
+    return f"""
+    <div class="info-card">
+        <div class="info-label">{label}</div>
+        <div class="info-value">{value}</div>
+    </div>
+    """
+
+with c1: st.markdown(info_card("소속", row['소속']), unsafe_allow_html=True)
+with c2: st.markdown(info_card("지역", row['지역']), unsafe_allow_html=True)
+with c3: st.markdown(info_card("주요 업무", row['업무']), unsafe_allow_html=True)
+with c4: st.markdown(info_card("참여 의지", row['참여의지']), unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True) # 여백 추가
+
+# --- 내용 파싱 ---
 try:
     ans = json.loads(str(row['인터뷰내용'])) if str(row['인터뷰내용']).strip() else {}
 except:
     ans = {"7-1": str(row['인터뷰내용'])}
 
-# 폼
-st.markdown("---")
+# --- 인터뷰 폼 ---
 with st.form("form"):
     tabs = st.tabs(["Daily", "Weekly", "중요비정기", "문서/협업", "우회행동", "AI활용", "기타"])
     
@@ -143,15 +189,33 @@ with st.form("form"):
     new_ans["7-1"] = q(tabs[6], "7-1", "개선 요청")
     new_ans["7-2"] = q(tabs[6], "7-2", "PC/모바일 비율")
 
-    if st.form_submit_button("💾 저장", use_container_width=True):
+    if st.form_submit_button("💾 저장하기", use_container_width=True):
         try:
-            # 컬럼 위치 찾기
             headers = worksheet.row_values(1)
-            col_idx = headers.index('인터뷰내용') + 1
-            # 업데이트
-            worksheet.update_cell(row_num, col_idx, json.dumps(new_ans, ensure_ascii=False))
-            st.toast("✅ 저장 완료")
+            
+            # 1. 인터뷰 내용 업데이트
+            try:
+                content_col = headers.index('인터뷰내용') + 1
+                worksheet.update_cell(row_num, content_col, json.dumps(new_ans, ensure_ascii=False))
+            except ValueError:
+                st.error("'인터뷰내용' 열을 찾을 수 없습니다.")
+                st.stop()
+
+            # 2. 저장 시간 업데이트 (한국 시간)
+            korea_timezone = pytz.timezone('Asia/Seoul')
+            save_time = datetime.now(korea_timezone).strftime("%Y-%m-%d %H:%M:%S")
+            
+            try:
+                # '저장시간' 열이 있으면 업데이트, 없으면 경고 없이 넘어감(혹은 마지막에 추가)
+                if '저장시간' in headers:
+                    time_col = headers.index('저장시간') + 1
+                    worksheet.update_cell(row_num, time_col, save_time)
+            except:
+                pass # 저장시간 열이 없으면 패스
+
+            st.toast(f"✅ 저장 완료! ({save_time})")
             time.sleep(1)
             st.rerun()
+            
         except Exception as e:
             st.error(f"저장 실패: {e}")
