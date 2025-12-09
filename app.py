@@ -55,7 +55,6 @@ def get_google_sheet():
         raw_secrets = st.secrets["connections"]["gsheets"]
         
         # 🚨 [핵심] 잡다한 정보 다 버리고, 구글이 딱 원하는 키만 새로 담기
-        # 이렇게 수동으로 딕셔너리를 만들어야 'No access token' 에러가 안 납니다.
         clean_creds = {
             "type": "service_account",
             "project_id": raw_secrets["project_id"],
@@ -70,7 +69,7 @@ def get_google_sheet():
             "client_x509_cert_url": raw_secrets.get("client_x509_cert_url", "")
         }
 
-        # 인증 범위 설정 (이게 없으면 ID토큰만 받아옵니다)
+        # 인증 범위 설정
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive"
@@ -99,6 +98,7 @@ except:
     st.stop()
 
 # 데이터 로드
+# 매번 최신 데이터를 불러와야 왼쪽 탭 변경 시 즉시 반영됨
 df = pd.DataFrame(worksheet.get_all_records())
 required_cols = ['지역', '이름', '직급', '직급 코드', '소속', '업무', '업무 카테고리', '참여의지', '인터뷰내용', '저장시간']
 
@@ -132,6 +132,7 @@ with st.sidebar:
     
     mask = (df['이름'] == s_name) & (df['소속'] == s_dept)
     row = df[mask].iloc[0]
+    # gspread는 1-based index이고, 헤더가 1행이므로 데이터는 2행부터 시작
     row_num = df[mask].index[0] + 2
 
 # --- 메인 상단 정보 (카드 디자인 적용) ---
@@ -168,7 +169,9 @@ with st.form("form"):
     def q(t, k, q_txt):
         with t:
             st.markdown(f"**{k} {q_txt}**")
-            return st.text_area("-", value=ans.get(k, ""), height=100, key=k, label_visibility="collapsed")
+            # 🚨 수정된 부분: key를 고유하게 만들어 사람 변경 시 리셋 유도
+            unique_key = f"{k}_{row_num}"
+            return st.text_area("-", value=ans.get(k, ""), height=100, key=unique_key, label_visibility="collapsed")
 
     new_ans = {}
     new_ans["1-1"] = q(tabs[0], "1-1", "출근 후 가장 먼저 하는 작업")
